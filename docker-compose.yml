@@ -1,67 +1,84 @@
 version: '3.8'
+
 x-common:
   database:
     &db-environment
-    # Do not remove the "&db-password" from the end of the line below, it is important
-    # for Panel functionality.
-    MYSQL_PASSWORD: &db-password "CHANGE_ME"
-    MYSQL_ROOT_PASSWORD: "CHANGE_ME_TOO"
+    MYSQL_PASSWORD: &db-password "${DB_PASSWORD:-heppycloud123}"
+    MYSQL_ROOT_PASSWORD: "${DB_ROOT_PASSWORD:-heppyroot123}"
   panel:
     &panel-environment
-    # This URL should be the URL that your reverse proxy routes to the panel server
-    APP_URL: "https://pterodactyl.example.com"
-    # A list of valid timezones can be found here: http://php.net/manual/en/timezones.php
-    APP_TIMEZONE: "UTC"
-    APP_SERVICE_AUTHOR: "noreply@example.com"
-    TRUSTED_PROXIES: "*" # Set this to your proxy IP
-    # Uncomment the line below and set to a non-empty value if you want to use Let's Encrypt
-    # to generate an SSL certificate for the Panel.
-    # LE_EMAIL: ""
+    APP_URL: "https://panel.rakanahsi.online"
+    APP_TIMEZONE: "${TIMEZONE:-Asia/Jakarta}"
+    APP_SERVICE_AUTHOR: "noreply@rakanahsi.online"
+    TRUSTED_PROXIES: "*"
   mail:
     &mail-environment
-    MAIL_FROM: "noreply@example.com"
+    MAIL_FROM: "noreply@rakanahsi.online"
     MAIL_DRIVER: "smtp"
     MAIL_HOST: "mail"
     MAIL_PORT: "1025"
     MAIL_USERNAME: ""
     MAIL_PASSWORD: ""
     MAIL_ENCRYPTION: "true"
- 
-#
-# ------------------------------------------------------------------------------------------
-# DANGER ZONE BELOW
-#
-# The remainder of this file likely does not need to be changed. Please only make modifications
-# below if you understand what you are doing.
-#
+
 services:
+  # Database MariaDB
   database:
     image: mariadb:10.5
-    restart: always
+    container_name: heppycloud_db
+    restart: unless-stopped
     command: --default-authentication-plugin=mysql_native_password
     volumes:
-      - "/srv/pterodactyl/database:/var/lib/mysql"
+      - "/srv/heppycloud/database:/var/lib/mysql"
+      - "./backups:/backups"
     environment:
       <<: *db-environment
       MYSQL_DATABASE: "panel"
       MYSQL_USER: "pterodactyl"
+    networks:
+      - heppycloud-network
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Redis Cache
   cache:
     image: redis:alpine
-    restart: always
+    container_name: heppycloud_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - "/srv/heppycloud/redis:/data"
+    networks:
+      - heppycloud-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Panel HeppyCloud
   panel:
     image: ghcr.io/pterodactyl/panel:latest
-    restart: always
+    container_name: heppycloud_panel
+    restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
-    links:
-      - database
-      - cache
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
     volumes:
-      - "/srv/pterodactyl/var/:/app/var/"
-      - "/srv/pterodactyl/nginx/:/etc/nginx/http.d/"
-      - "/srv/pterodactyl/certs/:/etc/letsencrypt/"
-      - "/srv/pterodactyl/logs/:/app/storage/logs"
+      - "/srv/heppycloud/var/:/app/var/"
+      - "/srv/heppycloud/nginx/:/etc/nginx/http.d/"
+      - "/srv/heppycloud/certs/:/etc/letsencrypt/"
+      - "/srv/heppycloud/logs/:/app/storage/logs"
+      - "/srv/heppycloud/uploads/:/app/public/uploads"
     environment:
       <<: [*panel-environment, *mail-environment]
       DB_PASSWORD: *db-password
@@ -73,8 +90,45 @@ services:
       REDIS_HOST: "cache"
       DB_HOST: "database"
       DB_PORT: "3306"
+    networks:
+      - heppycloud-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Wings - Game Server Daemon
+  wings:
+    image: ghcr.io/pterodactyl/wings:latest
+    container_name: heppycloud_wings
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "2022:2022"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "/srv/heppycloud/servers/:/var/lib/pterodactyl/volumes"
+      - "/srv/heppycloud/logs/wings/:/var/log/pterodactyl"
+    environment:
+      WINGS_DEBUG: "false"
+      WINGS_PANEL_URL: "https://panel.rakanahsi.online"
+    networks:
+      - heppycloud-network
+    depends_on:
+      - panel
+
 networks:
-  default:
+  heppycloud-network:
+    driver: bridge
     ipam:
       config:
         - subnet: 172.20.0.0/16
+
+volumes:
+  database_data:
+    driver: local
+  redis_data:
+    driver: local
+  server_data:
+    driver: local
